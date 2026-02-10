@@ -16,11 +16,23 @@ namespace ImageCropTool
 {
     public partial class MainForm : Form
     {
+
         /* =========================================================
          *  Context Menu (Line Delete)
          * ========================================================= */
         private ContextMenuStrip lineContextMenu;
         private BaseLineInfo contextTargetLine = null;  // 우클릭 대상 라인
+        private CropBoxInfo selectedCropBox = null;
+
+
+        enum ListViewMode
+        {
+            LineList,
+            CropList
+        }
+
+        private ListViewMode currentListMode = ListViewMode.LineList;
+        private BaseLineInfo currentLineInView = null;
 
         /* =========================================================
          *  Line / Crop Info
@@ -108,6 +120,14 @@ namespace ImageCropTool
                 pictureBoxImage.Invalidate();
             };
 
+            listViewMain.View = View.List;
+            listViewMain.FullRowSelect = true;
+            listViewMain.HideSelection = false;
+
+            listViewMain.Click += listViewMain_Click;
+            listViewMain.DoubleClick += listViewMain_DoubleClick;
+            listViewMain.SelectedIndexChanged += listViewMain_SelectedIndexChanged;
+
             pictureBoxImage.SizeMode = PictureBoxSizeMode.Normal;
             pictureBoxImage.Paint += PictureBoxImage_Paint;
             pictureBoxImage.MouseDown += PictureBoxImage_MouseDown;
@@ -151,8 +171,8 @@ namespace ImageCropTool
             // UI 초기화
             ClearPreview();
             ResetView();
-
             UpdateLineInfo(null);
+            listViewMain.Items.Clear();
 
             //  JSON 파일도 삭제
             if (!string.IsNullOrEmpty(currentImagePath))
@@ -216,6 +236,7 @@ namespace ImageCropTool
             }
 
             ClearPreview();
+            ShowLineList();
             UpdateLineInfo(null);
 
             pictureBoxImage.Invalidate();
@@ -313,6 +334,7 @@ namespace ImageCropTool
                 // 7️ View 초기화 + 티칭 복원
                 ResetView();
                 LoadTeachingData(currentImagePath);
+                ShowLineList();
             }
             catch (Exception ex)
             {
@@ -396,8 +418,9 @@ namespace ImageCropTool
          * ========================================================= */
         private void PictureBoxImage_MouseDown(object sender, MouseEventArgs e)
         {
-            if (viewBitmap == null)
+            if (originalMat == null || viewBitmap == null)
                 return;
+
 
             if (!IsInsideImageScreen(e.Location))
             {
@@ -488,7 +511,7 @@ namespace ImageCropTool
 
                         CalculateCropBoxes(currentLine);
                         baseLines.Add(currentLine);
-
+                        ShowLineList();
                         currentLine = null;
                         clickState = ClickState.None;
                     }
@@ -802,23 +825,28 @@ namespace ImageCropTool
         /* =========================================================
          *  Preview 미리보기
          * ========================================================= */
-        private void ShowCropPreview(CropBoxInfo hoverdBox)   // 박스 미리보기
+        private void ShowCropPreview(CropBoxInfo crop)
         {
-            if (hoverdBox == null || originalMat == null)
+            if (crop == null || originalMat == null)
                 return;
 
-            Rectangle r = hoverdBox.EffectiveRect;
+            Rectangle r = crop.EffectiveRect;
 
-            var roi = new OpenCvSharp.Rect(   // ROI 생성
-                r.X, r.Y, r.Width, r.Height
+            // 원본 Mat 기준 ROI
+            var roi = new OpenCvSharp.Rect(
+                r.X,
+                r.Y,
+                r.Width,
+                r.Height
             );
 
-            using (Mat cropped = new Mat(originalMat, roi))   // ROI로 Mat 잘라내기
+            using (Mat cropped = new Mat(originalMat, roi))
             {
                 pictureBoxPreview.Image?.Dispose();
                 pictureBoxPreview.Image = BitmapConverter.ToBitmap(cropped);
             }
         }
+
 
         private void ClearPreview()
         {
@@ -870,7 +898,6 @@ namespace ImageCropTool
                 }
                 lineIndex++;
             }
-
             MessageBox.Show("크롭 이미지 저장 완료");
         }
 
@@ -976,13 +1003,187 @@ namespace ImageCropTool
         }
 
         /* =========================================================
+         *  List
+         * ========================================================= */
+        private void ShowLineList()
+        {
+            listViewMain.BeginUpdate();
+            listViewMain.Items.Clear();
+
+            for (int i = 0; i < baseLines.Count; i++)
+            {
+                baseLines[i].LineIndex = i + 1;
+
+                ListViewItem item = new ListViewItem($"Line {i + 1}");
+                item.Tag = baseLines[i];
+
+                listViewMain.Items.Add(item);
+            }
+
+            currentListMode = ListViewMode.LineList;
+            currentLineInView = null;
+
+            listViewMain.EndUpdate();
+        }
+
+        private void ShowCropList(BaseLineInfo line)
+        {
+            listViewMain.Items.Clear();
+
+            // Back
+            ListViewItem back = new ListViewItem("< Back");
+            back.Tag = null;
+            listViewMain.Items.Add(back);
+
+            for (int i = 0; i < line.CropBoxes.Count; i++)
+            {
+                ListViewItem item = new ListViewItem($"Crop {i + 1}");
+                item.Tag = line.CropBoxes[i];
+                listViewMain.Items.Add(item);
+            }
+
+            currentListMode = ListViewMode.CropList;
+            currentLineInView = line;
+            selectedCropBox = null;
+
+            // Crop 리스트 진입 시
+            // 라인 전체 하이라이트 유지
+            HighlightLine(line);
+
+            pictureBoxImage.Invalidate();
+        }
+
+        private void listViewMain_Click(object sender, EventArgs e)
+        {
+            // 선택된 항목이 없으면 종료
+            if (listViewMain.SelectedItems.Count == 0)
+                return;
+
+            // 현재 모드가 Line 리스트일 때만
+            if (currentListMode != ListViewMode.LineList)
+                return;
+
+            ListViewItem item = listViewMain.SelectedItems[0];
+
+            BaseLineInfo line = item.Tag as BaseLineInfo;
+            if (line == null)
+                return;
+
+            // 현재 선택 라인 갱신
+            currentLineInView = line;
+
+            //  해당 라인의 모든 CropBox 하이라이트
+            HighlightLine(line);
+            UpdateLineInfo(line);
+
+            pictureBoxImage.Invalidate();
+        }
+
+
+        private void listViewMain_DoubleClick(object sender, EventArgs e)
+        {
+            if (listViewMain.SelectedItems.Count == 0)
+                return;
+
+            ListViewItem item = listViewMain.SelectedItems[0];
+
+            // Line → Crop 리스트로 진입
+            if (currentListMode == ListViewMode.LineList)
+            {
+                BaseLineInfo line = item.Tag as BaseLineInfo;
+                if (line == null)
+                    return;
+
+                ShowCropList(line);
+                return;
+            }
+
+            // CropList에서는 더블클릭 아무 동작 안 함
+        }
+
+
+        private void listViewMain_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (listViewMain.SelectedItems.Count == 0)
+                return;
+
+            ListViewItem item = listViewMain.SelectedItems[0];
+
+            // =========================
+            // Crop 리스트 모드
+            // =========================
+            if (currentListMode == ListViewMode.CropList)
+            {
+                // Back은 즉시 LineList로
+                if (item.Text == "< Back")
+                {
+                    ShowLineList();
+                    return;
+                }
+
+                CropBoxInfo crop = item.Tag as CropBoxInfo;
+                if (crop == null)
+                    return;
+
+                selectedCropBox = crop;
+
+                // 1. 하이라이트
+                ClearAllHighlights();
+                crop.IsHovered = true;
+
+                // 2. Preview
+                ShowCropPreview(crop);
+
+                pictureBoxImage.Invalidate();
+                return;
+            }
+
+            // =========================
+            // Line 리스트 모드
+            // =========================
+            if (currentListMode == ListViewMode.LineList)
+            {
+                BaseLineInfo line = item.Tag as BaseLineInfo;
+                if (line == null)
+                    return;
+
+                currentLineInView = line;
+                selectedCropBox = null;
+
+                HighlightLine(line);
+                pictureBoxImage.Invalidate();
+                return;
+            }
+        }
+
+
+        private void ClearAllHighlights()
+        {
+            foreach (var line in baseLines)
+                foreach (var box in line.CropBoxes)
+                    box.IsHovered = false;
+        }
+
+        private void HighlightLine(BaseLineInfo line)
+        {
+            ClearAllHighlights();
+
+            if (line == null)
+                return;
+
+            foreach (var box in line.CropBoxes)
+                box.IsHovered = true;
+        }
+
+
+        /* =========================================================
          *  UI
          * ========================================================= */
         private void UpdateLineInfo(BaseLineInfo line)
         {
             if (line == null)
             {
-                lblLineIndex.Text = "Line Index: -";
+                lblLineIndex.Text = "Line Index : -";
                 lblLineLength.Text = "Line Length : -";
                 lblCropCount.Text = "Crop Count : -";
                 lblCropSize.Text = "Crop Size : -";

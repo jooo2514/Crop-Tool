@@ -5,6 +5,7 @@ namespace ImageCropTool
 {
     class BaseLineInfo
     {
+        public int LineIndex { get; set; }
         // 기준선
         public PointF StartPt;     // original 좌표
         public PointF EndPt;
