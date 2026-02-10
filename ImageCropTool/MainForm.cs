@@ -7,6 +7,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Newtonsoft.Json;
 
 // 충돌 방지 별칭
 using DPoint = System.Drawing.Point;
@@ -34,10 +35,11 @@ namespace ImageCropTool
          *  Image
          * ========================================================= */
         private Bitmap viewBitmap;
-        private Bitmap originalBitmap;
+        //private Bitmap originalBitmap;
         private Mat originalMat;
 
         private string imageColorInfoText = string.Empty;
+        private string currentImagePath = null;
 
         /* =========================================================
          *  Loading Spinner
@@ -115,6 +117,7 @@ namespace ImageCropTool
 
             pictureBoxPreview.SizeMode = PictureBoxSizeMode.Zoom;
             numCropSize.Value = DefaultCropSize;
+            this.FormClosing += MainForm_FormClosing;
 
             lineContextMenu = new ContextMenuStrip();
 
@@ -149,10 +152,18 @@ namespace ImageCropTool
             ClearPreview();
             ResetView();
 
-            // Line info 초기화
-            lblLineIndex.Text = "Line Index: -";
-            lblLineLength.Text = "Line Length: -";
-            lblCropCount.Text = "Crop Count: -";
+            UpdateLineInfo(null);
+
+            //  JSON 파일도 삭제
+            if (!string.IsNullOrEmpty(currentImagePath))
+            {
+                string jsonPath = currentImagePath + ".teaching.json";
+                if (File.Exists(jsonPath))
+                {
+                    File.Delete(jsonPath);
+                }
+            }
+
 
             // Crop size는 기본값으로
             numCropSize.Value = DefaultCropSize;
@@ -209,11 +220,19 @@ namespace ImageCropTool
 
             pictureBoxImage.Invalidate();
         }
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(currentImagePath))
+            {
+                SaveTeachingData(currentImagePath);
+            }
+        }
 
 
         /* =========================================================
          *  Image Load
          * ========================================================= */
+
         private async void BtnLoadImage_Click(object sender, EventArgs e)
         {
             OpenFileDialog dlg = new OpenFileDialog
@@ -224,6 +243,26 @@ namespace ImageCropTool
             if (dlg.ShowDialog() != DialogResult.OK)
                 return;
 
+            string newImagePath = dlg.FileName;
+
+            // 1️ 이전 이미지 티칭 정보 저장
+            if (!string.IsNullOrEmpty(currentImagePath))
+            {
+                SaveTeachingData(currentImagePath);
+            }
+
+            currentImagePath = newImagePath;
+
+            // 2️ 메모리 상태 초기화
+            baseLines.Clear();
+            currentLine = null;
+            hoveredBox = null;
+            draggingLine = null;
+            dragTarget = DragTarget.None;
+            ClearPreview();
+            UpdateLineInfo(null);
+
+            // 3️ 로딩 UI ON
             isImageLoading = true;
             loadingTimer.Start();
 
@@ -232,35 +271,48 @@ namespace ImageCropTool
             btnLoadImage.Enabled = false;
             btnReset.Enabled = false;
 
+            Mat loadedMat = null;
+            Bitmap viewBmp = null;
+
             try
             {
-                await Task.Run(() =>
+                // 4️ 백그라운드: OpenCV로 이미지 로드
+                loadedMat = await Task.Run(() =>
                 {
-                    using (Bitmap full = new Bitmap(dlg.FileName))
-                    {
-                        viewBitmap = ResizeToFit(
-                            full,
-                            pictureBoxImage.Width,
-                            pictureBoxImage.Height
-                        );
-                    }
-
-                    originalBitmap?.Dispose();
-                    originalMat?.Dispose();
-
-                    originalBitmap = new Bitmap(dlg.FileName);
-                    originalMat = BitmapConverter.ToMat(originalBitmap);  // 연산용
-
-                    // 이미지 타입 판별
-                    if (originalMat.Channels() == 1)
-                        imageColorInfoText = "Grayscale (CV_8UC1)";
-                    else if (originalMat.Channels() == 3)
-                        imageColorInfoText = "Color (CV_8UC3)";
-                    else
-                        imageColorInfoText = $"Channels: {originalMat.Channels()}";
+                    byte[] bytes = File.ReadAllBytes(currentImagePath);
+                    return Cv2.ImDecode(bytes, ImreadModes.Unchanged);
                 });
 
-                ResetAll();
+                if (loadedMat.Empty())
+                    throw new Exception("이미지를 불러올 수 없습니다.");
+
+                // 5️ UI 스레드: View용 Bitmap 생성
+                viewBmp = BitmapConverter.ToBitmap(loadedMat);
+
+                viewBitmap?.Dispose();
+                viewBitmap = ResizeToFit(
+                    viewBmp,
+                    pictureBoxImage.Width,
+                    pictureBoxImage.Height
+                );
+
+                // 6️ 원본 Mat 교체
+                originalMat?.Dispose();
+
+                originalMat = loadedMat;
+                loadedMat = null;
+
+                // 이미지 타입 판별
+                if (originalMat.Channels() == 1)
+                    imageColorInfoText = "Grayscale (CV_8UC1)";
+                else if (originalMat.Channels() == 3)
+                    imageColorInfoText = "Color (CV_8UC3)";
+                else
+                    imageColorInfoText = $"Channels: {originalMat.Channels()}";
+
+                // 7️ View 초기화 + 티칭 복원
+                ResetView();
+                LoadTeachingData(currentImagePath);
             }
             catch (Exception ex)
             {
@@ -268,6 +320,10 @@ namespace ImageCropTool
             }
             finally
             {
+                viewBmp?.Dispose();
+                loadedMat?.Dispose();
+
+                // 8️ 로딩 UI OFF
                 isImageLoading = false;
                 loadingTimer.Stop();
 
@@ -300,6 +356,40 @@ namespace ImageCropTool
 
             return dst;
         }
+
+        private void LoadTeachingData(string imagePath)
+        {
+            string jsonPath = imagePath + ".teaching.json";
+
+            if (!File.Exists(jsonPath))
+                return;
+
+            string json = File.ReadAllText(jsonPath);
+
+            TeachingData data = JsonConvert.DeserializeObject<TeachingData>(json);
+
+            if (data == null || data.Lines == null)
+                return;
+
+            baseLines.Clear();
+
+            foreach (var lineData in data.Lines)
+            {
+                BaseLineInfo line = new BaseLineInfo
+                {
+                    StartPt = lineData.StartPt,
+                    EndPt = lineData.EndPt,
+                    CropSize = lineData.CropSize,
+                    Anchor = lineData.Anchor
+                };
+
+                CalculateCropBoxes(line);
+                baseLines.Add(line);
+            }
+
+            pictureBoxImage.Invalidate();
+        }
+
 
         /* =========================================================
          *  Mouse Down
@@ -405,7 +495,6 @@ namespace ImageCropTool
 
                     pictureBoxImage.Invalidate();
                     break;
-
             }
         }
 
@@ -578,7 +667,6 @@ namespace ImageCropTool
                 }
             }
         }
-
 
         private void DrawPoint(Graphics g, PointF originalPt)
         {
@@ -786,23 +874,60 @@ namespace ImageCropTool
             MessageBox.Show("크롭 이미지 저장 완료");
         }
 
+        private void SaveTeachingData(string imagePath)
+        {
+            if (baseLines.Count == 0 || string.IsNullOrEmpty(imagePath))
+                return;
+
+            TeachingData data = new TeachingData
+            {
+                ImagePath = imagePath
+            };
+
+            foreach (var line in baseLines)
+            {
+                data.Lines.Add(new BaseLineData
+                {
+                    StartPt = line.StartPt,
+                    EndPt = line.EndPt,
+                    CropSize = line.CropSize,
+                    Anchor = line.Anchor
+                });
+            }
+
+            string jsonPath = imagePath + ".teaching.json";
+            string json = JsonConvert.SerializeObject(
+                data,
+                Formatting.Indented
+            );
+
+            File.WriteAllText(jsonPath, json);
+
+        }
 
         /* =========================================================
          *  좌표 계산
          * ========================================================= */
         private PointF ViewToOriginal(PointF viewPt)
         {
+            if (originalMat == null || viewBitmap == null)
+                return PointF.Empty;
+
             return new PointF(
-                viewPt.X * originalBitmap.Width / viewBitmap.Width,
-                viewPt.Y * originalBitmap.Height / viewBitmap.Height
+                viewPt.X * originalMat.Width / viewBitmap.Width,
+                viewPt.Y * originalMat.Height / viewBitmap.Height
             );
         }
 
+
         private PointF OriginalToView(PointF originalPt)
         {
+            if (originalMat == null || viewBitmap == null)
+                return PointF.Empty;
+
             return new PointF(
-                originalPt.X * viewBitmap.Width / originalBitmap.Width,
-                originalPt.Y * viewBitmap.Height / originalBitmap.Height
+                originalPt.X * viewBitmap.Width / originalMat.Width,
+                originalPt.Y * viewBitmap.Height / originalMat.Height
             );
         }
 
