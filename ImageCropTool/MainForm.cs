@@ -16,9 +16,15 @@ namespace ImageCropTool
     public partial class MainForm : Form
     {
         /* =========================================================
+         *  Context Menu (Line Delete)
+         * ========================================================= */
+        private ContextMenuStrip lineContextMenu;
+        private BaseLineInfo contextTargetLine = null;  // 우클릭 대상 라인
+
+        /* =========================================================
          *  Line / Crop Info
          * ========================================================= */
-  
+
         private const int DefaultCropSize = 512;
         private List<BaseLineInfo> baseLines = new List<BaseLineInfo>();   // 모든 기준선 목록
         private BaseLineInfo currentLine = null;      // 현재 그리고 있는 기준선 (아직 완성 안됨)
@@ -109,6 +115,18 @@ namespace ImageCropTool
 
             pictureBoxPreview.SizeMode = PictureBoxSizeMode.Zoom;
             numCropSize.Value = DefaultCropSize;
+
+            lineContextMenu = new ContextMenuStrip();
+
+            var deleteLineItem = new ToolStripMenuItem("라인 삭제");
+            deleteLineItem.Click += (s, e) =>
+            {
+                if (contextTargetLine != null)
+                    DeleteLine(contextTargetLine);
+            };
+
+            lineContextMenu.Items.Add(deleteLineItem);
+
         }
 
         /* =========================================================
@@ -168,6 +186,30 @@ namespace ImageCropTool
             //UpdateLineInfo();
             pictureBoxImage.Invalidate();
         }
+
+        private void DeleteLine(BaseLineInfo line)
+        {
+            if (line == null)
+                return;
+
+            baseLines.Remove(line);
+
+            // hover / drag 상태 정리
+            if (hoveredBox != null && hoveredBox.OwnerLine == line)
+                hoveredBox = null;
+
+            if (draggingLine == line)
+            {
+                draggingLine = null;
+                dragTarget = DragTarget.None;
+            }
+
+            ClearPreview();
+            UpdateLineInfo(null);
+
+            pictureBoxImage.Invalidate();
+        }
+
 
         /* =========================================================
          *  Image Load
@@ -281,9 +323,37 @@ namespace ImageCropTool
             switch (e.Button)
             {
                 case MouseButtons.Right:
-                    isPanning = true;
-                    lastMousePt = e.Location;
-                    return;
+                    {
+                        // 1️⃣ 크롭박스 위에서 우클릭했는지 검사
+                        PointF ViewPt = ScreenToView(e.Location);
+                        PointF OriginalPt = ViewToOriginal(ViewPt);
+
+                        foreach (var line in baseLines)
+                        {
+                            foreach (var box in line.CropBoxes)
+                            {
+                                if (box.EffectiveRect.Contains(
+                                        (int)OriginalPt.X,
+                                        (int)OriginalPt.Y))
+                                {
+                                    // 🔥 컨텍스트 메뉴 대상 라인 설정
+                                    contextTargetLine = line;
+
+                                    // 컨텍스트 메뉴 표시
+                                    lineContextMenu.Show(
+                                        pictureBoxImage,
+                                        e.Location
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+
+                        // 2️⃣ 크롭박스가 아니면 → 기존 패닝
+                        isPanning = true;
+                        lastMousePt = e.Location;
+                        return;
+                    }
 
                 case MouseButtons.Left:
 
